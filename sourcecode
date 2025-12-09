@@ -1,0 +1,136 @@
+/***************************************************
+ * ESP32 Health Monitor with DHT11 + MAX30102 + AD8232
+ * Fixed: Heart Rate Display Working ✅
+ ***************************************************/
+
+#define BLYNK_TEMPLATE_ID "TMPL3VA2kyMsQ"
+#define BLYNK_TEMPLATE_NAME "esp32 health module"
+#define BLYNK_AUTH_TOKEN "A42v7rWZNpesvXbw5orL9P1qnc-4IDhA"
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+#include "DHT.h"
+#include "MAX30105.h"
+#include "heartRate.h"
+
+// ====== Wi-Fi Credentials ======
+char auth[] = BLYNK_AUTH_TOKEN;
+char ssid[] = "Veera";
+char pass[] = "12345678";
+
+// ====== DHT11 Setup ======
+#define DHTPIN 4
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// ====== ECG Sensor ======
+#define ECG_PIN 34
+
+// ====== MAX30102 Sensor ======
+MAX30105 particleSensor;
+BlynkTimer timer;
+
+const byte RATE_SIZE = 4;
+byte rates[RATE_SIZE]; 
+byte rateSpot = 0;
+long lastBeat = 0;
+float beatsPerMinute;
+int beatAvg;
+
+float currentSpO2 = 0.0;
+
+void readHeartAndOxygen() {
+  long irValue = particleSensor.getIR();
+  long redValue = particleSensor.getRed();
+
+  // Check if finger is placed properly
+  if (irValue < 50000) {
+    Serial.println("Place finger on the sensor...");
+    beatAvg = 0;
+    currentSpO2 = 0;
+    return;
+  }
+
+  // --- Heart Rate Detection ---
+  if (checkForBeat(irValue)) {
+    long delta = millis() - lastBeat;
+    lastBeat = millis();
+
+    beatsPerMinute = 60 / (delta / 1000.0);
+
+    if (beatsPerMinute < 200 && beatsPerMinute > 40) {
+      rates[rateSpot++] = (byte)beatsPerMinute;
+      rateSpot %= RATE_SIZE;
+
+      int sum = 0;
+      for (byte x = 0; x < RATE_SIZE; x++) sum += rates[x];
+      beatAvg = sum / RATE_SIZE;
+
+      Serial.print("❤ Heart Beat Detected! HR = ");
+      Serial.print(beatAvg);
+      Serial.println(" bpm");
+    }
+  }
+
+  // --- SpO2 Estimation (Simple Ratio) ---
+  float ratio = (float)redValue / (float)irValue;
+  currentSpO2 = 110.0 - 25.0 * ratio;
+  if (currentSpO2 > 100) currentSpO2 = 100;
+  if (currentSpO2 < 80) currentSpO2 = 80;
+}
+
+void sendSensorData() {
+  readHeartAndOxygen();
+
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+  int ecgValue = analogRead(ECG_PIN);
+
+  if (isnan(temp) || isnan(hum)) {
+    Serial.println("DHT11 Error");
+    return;
+  }
+
+  Blynk.virtualWrite(V0, temp);
+  Blynk.virtualWrite(V1, hum);
+  Blynk.virtualWrite(V3, ecgValue);
+  Blynk.virtualWrite(V6, beatAvg);
+  Blynk.virtualWrite(V7, currentSpO2);
+
+  Serial.print("Temp: "); Serial.print(temp);
+  Serial.print(" °C | Hum: "); Serial.print(hum);
+  Serial.print("% | HR: "); Serial.print(beatAvg);
+  Serial.print(" bpm | SpO2: "); Serial.print(currentSpO2);
+  Serial.print("% | ECG: "); Serial.println(ecgValue);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  Blynk.begin(auth, ssid, pass);
+  dht.begin();
+
+  // Initialize MAX30102
+  if (!particleSensor.begin(Wire, I2C_SPEED_STANDARD)) {
+    Serial.println("MAX30102 not found. Check wiring!");
+    while (1);
+  }
+
+  // Setup with tuned parameters
+  particleSensor.setup(60, 4, 2, 400, 411, 4096);
+  particleSensor.setPulseAmplitudeRed(0xFF);
+  particleSensor.setPulseAmplitudeIR(0xFF);
+  particleSensor.setPulseAmplitudeGreen(0);
+
+  Serial.println("✅ MAX30102 Initialized — place your finger on the sensor.");
+
+  pinMode(ECG_PIN, INPUT);
+  timer.setInterval(2000L, sendSensorData);
+}
+
+void loop() {
+  Blynk.run();
+  timer.run();
+}
